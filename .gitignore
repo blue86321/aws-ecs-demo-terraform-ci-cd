@@ -1,0 +1,10 @@
+# Mac
+.DS_STORE
+
+# Python
+venv
+.venv
+__pycache__
+
+# Terraform
+.terraform
