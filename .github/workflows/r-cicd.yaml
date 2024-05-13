@@ -1,0 +1,111 @@
+name: "r-cicd"
+
+on:
+  workflow_call:
+    inputs:
+      project_path:
+        required: true
+        type: string
+      project_name:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+
+jobs:
+  ecr-build:
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.project_path }}
+    outputs:
+      image_name: ${{ steps.build-image.outputs.image_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_IAM_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build docker image and push to AWS ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.project_name }}
+          IMAGE_TAG: ${{ github.run_number }}
+        run: |
+          IMAGE_NAME=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker build --file ${{ inputs.dockerfile }} --tag $IMAGE_NAME .
+          docker push $IMAGE_NAME
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+  ecs-deploy:
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    needs:
+      - ecr-build
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_IAM_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Download task definition
+        env:
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ inputs.project_name }} \
+            --query taskDefinition > ${{ github.workspace }}/task-definition-${{ github.sha }}.json
+
+      # We don't need environment files as it is configured in Terraform, otherwise it's better to upload to S3
+      - name: Fill in the new image ID in AWS ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ github.workspace }}/task-definition-${{ github.sha }}.json
+          container-name: ${{ inputs.project_name }}
+          image: ${{ needs.ecr-build.outputs.image_name }}
+
+      - name: Deploy AWS ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ inputs.project_name }}
+          cluster: ${{ vars.ECS_CLUSTER_NAME }}
+          wait-for-service-stability: true
+
+      # This script is primary from ChatGPT
+      # This step is not practical for a demo since it makes the terraform resource (aws_ecs_task_definition) 
+      # stuck in DELETE_IN_PROGRESS for 15min
+      # - name: Delete unused ECS task definitions (Clean up)
+      #   env:
+      #     AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+      #   run: |
+      #     # List all task definitions
+      #     task_defs=$(aws ecs list-task-definitions --status ACTIVE --query 'taskDefinitionArns[*]' --output text)
+
+      #     # Get all active task definition families in use by services
+      #     active_task_defs=$(aws ecs list-services --cluster ${{ vars.ECS_CLUSTER_NAME }} --query 'serviceArns[*]' --output text | xargs -n1 -I{} aws ecs describe-services --cluster ${{ vars.ECS_CLUSTER_NAME }} --services {} --query 'services[*].taskDefinition' --output text)
+
+      #     for task_arn in $task_defs; do
+      #       if ! [[ $active_task_defs =~ $task_arn ]]; then
+      #         echo "Deleting unused task definition: $task_arn"
+      #         aws ecs deregister-task-definition --task-definition $task_arn
+      #         aws ecs delete-task-definitions --task-definition $task_arn
+      #       fi
+      #     done

@@ -1,0 +1,18 @@
+name: "web_backend-workflow"
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "web_backend/**" # Trigger only when there are changes in this folder
+
+jobs:
+  cicd:
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/r-cicd.yaml
+    with:
+      project_path: "web_backend"
+      project_name: "web_backend"
+      dockerfile: "Dockerfile"
