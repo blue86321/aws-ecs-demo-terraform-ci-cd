@@ -22,3 +22,4 @@ http://localhost:8000/docs
 ```bash
 docker compose -f compose.local.yaml down -v --rmi all
 ```
+
